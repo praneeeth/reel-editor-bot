@@ -148,10 +148,12 @@ def validate_edl(
                     f"word boundary and pad 30-200 ms)"
                 )
 
-    if not errors:
+    try:
         total = total_duration(edl)
-        if total > max_seconds:
-            errors.append(f"total duration {total:.1f}s exceeds the {max_seconds:.0f}s maximum")
+    except (KeyError, TypeError, ValueError):
+        total = 0.0
+    if total > max_seconds:
+        errors.append(f"total duration {total:.1f}s exceeds the {max_seconds:.0f}s maximum")
 
     if not allow_overlays and edl.get("overlays"):
         errors.append("animation overlays are disabled in LEAN_MODE; set 'overlays' to []")
