@@ -9,7 +9,7 @@ import shutil
 from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.error import BadRequest, TelegramError
+from telegram.error import BadRequest, NetworkError, TelegramError
 from telegram.ext import (
     Application, ApplicationBuilder, ApplicationHandlerStop, CallbackQueryHandler,
     CommandHandler, ContextTypes, MessageHandler, TypeHandler, filters,
@@ -18,7 +18,9 @@ from telegram.ext import (
 from .agent import make_backend
 from .config import MAX_OUTPUT_SECONDS, Settings
 from .db import DB, Job
-from .media import VIDEO_EXTS, probe
+from .media import (
+    ASSETS_DIR, AUDIO_EXTS, IMAGE_EXTS, VIDEO_EXTS, add_note, media_kind, probe,
+)
 from .pipeline import Pipeline, job_dir
 from .skill import ensure_skill_registered
 from .states import QUEUED, RUNNING, Event, InvalidTransition, JobState
@@ -27,16 +29,27 @@ from .worker import Worker, cleanup_loop
 log = logging.getLogger(__name__)
 
 MAX_CLIPS = 10
+MAX_IMAGES = 10
+MAX_MUSIC = 3
+# states in which new clips / images / music can be added to a job
+ADD_MEDIA_STATES = frozenset({
+    JobState.COLLECTING, JobState.AWAITING_APPROVAL, JobState.AWAITING_PLAN_FEEDBACK,
+    JobState.PREVIEW_READY,
+})
 LOCAL_API_CONTAINER_DIR = "/var/lib/telegram-bot-api"
 
 START_TEXT = (
     "Hi! I turn your clips into a vertical Reel / Short (1080x1920, max 3 min, bold captions).\n\n"
     "1. Send one or more clips. Send them as a <b>File</b> (📎 → File) so Telegram doesn't "
     "compress them.\n"
-    "2. Then tell me what you want, e.g. <i>cut the ums, punchy 60s reel, bold captions</i>.\n"
+    "Optional: send b-roll clips, images/logos (as File to keep transparency) and music too – "
+    "add a caption to any file to say what it's for.\n"
+    "2. Then tell me what you want, e.g. <i>cut the ums, punchy 60s reel, bold captions, fade "
+    "transitions, my logo top-left, music quietly underneath</i>.\n"
     "3. I reply with a plan → tap <b>Approve</b> → I send a 720p preview.\n"
-    "4. Reply with changes (e.g. <i>trim the intro, yellow captions</i>) or tap <b>Final</b> for "
-    "the full-quality export.\n\n"
+    "4. Reply with changes (e.g. <i>trim the intro, yellow captions, blur the number plate at "
+    "0:05, add a title “3 TIPS”</i>) – you can send more files at this point too – or tap "
+    "<b>Final</b> for the full-quality export.\n\n"
     "/new – start a new job · /status – what I'm doing · /cancel – stop the current job"
 )
 
@@ -104,6 +117,8 @@ class TelegramNotifier:
                 q = str(b.get("quote", ""))[:60]
                 lines.append(f"• <b>{html.escape(str(b.get('beat', '')))}</b> "
                              f"{html.escape(q)}")
+        if plan.get("additions"):
+            lines += ["", "<b>Adds:</b> " + html.escape("; ".join(map(str, plan["additions"])))]
         if plan.get("assumptions"):
             lines += ["", "<i>Assumed:</i> " + html.escape("; ".join(map(str,
                                                                           plan["assumptions"])))]
@@ -156,7 +171,8 @@ class Handlers:
         app.add_handler(CommandHandler("status", self.status))
         app.add_handler(CommandHandler("cancel", self.cancel))
         app.add_handler(MessageHandler(
-            filters.VIDEO | filters.Document.ALL | filters.VIDEO_NOTE, self.media))
+            filters.VIDEO | filters.Document.ALL | filters.VIDEO_NOTE | filters.PHOTO
+            | filters.AUDIO, self.media))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.text))
         app.add_handler(CallbackQueryHandler(self.button))
 
@@ -223,39 +239,60 @@ class Handlers:
 
     # -- clips -----------------------------------------------------------------------
     async def media(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Clips (video), images (photo / logo) and music (audio), in any editable state."""
         msg = update.effective_message
         user, chat = update.effective_user, update.effective_chat
-        as_video = msg.video or msg.video_note
-        tg = as_video or msg.document
-        name = getattr(tg, "file_name", None) or ""
-        ext = Path(name).suffix.lower() if name else ".mp4"
-        if msg.document and not ((msg.document.mime_type or "").startswith("video/")
-                                 or ext in VIDEO_EXTS):
-            await msg.reply_text("That doesn't look like a video. Send an .mp4 / .mov file.")
+        compressed = bool(msg.video or msg.video_note or msg.photo)
+        if msg.photo:
+            tg, kind, ext = msg.photo[-1], "image", ".jpg"
+        elif msg.video or msg.video_note:
+            tg, kind, ext = msg.video or msg.video_note, "clip", ".mp4"
+        elif msg.audio:
+            tg, kind = msg.audio, "music"
+            ext = Path(msg.audio.file_name or "a.mp3").suffix.lower() or ".mp3"
+        else:
+            tg = msg.document
+            name = tg.file_name or ""
+            kind = media_kind(name, tg.mime_type)
+            ext = Path(name).suffix.lower()
+        if kind is None:
+            await msg.reply_text("I can use videos, images (logos, photos) and audio (music). "
+                                 "That file doesn't look like any of them.")
             return
-        if ext not in VIDEO_EXTS:
-            ext = ".mp4"
+        default_ext = {"clip": ".mp4", "image": ".jpg", "music": ".mp3"}[kind]
+        allowed = {"clip": VIDEO_EXTS, "image": IMAGE_EXTS, "music": AUDIO_EXTS}[kind]
+        if ext not in allowed:
+            ext = default_ext
 
-        limit = self.settings.download_limit
-        if tg.file_size and tg.file_size > limit:
+        if tg.file_size and tg.file_size > self.settings.download_limit:
             await msg.reply_text(self._too_big(tg.file_size))
             return
 
         job = self.db.active_job(user.id)
         if job is None:
             job = self.db.create_job(user.id, chat.id)
-        if job.state != JobState.COLLECTING:
+        if job.state not in ADD_MEDIA_STATES:
             await msg.reply_text(
-                f"Your current job is {STATE_LABEL[job.state]}. Send /new to start a new job "
-                "with these clips.")
-            return
-        if len(job.clips) >= MAX_CLIPS:
-            await msg.reply_text(f"Max {MAX_CLIPS} clips per job. Now send your instructions.")
+                f"Your current job is {STATE_LABEL[job.state]}. Wait for it to finish, or send "
+                "/new to start a new job.")
             return
 
         d = job_dir(self.settings, job)
-        d.mkdir(parents=True, exist_ok=True)
-        dest = d / f"clip{len(job.clips) + 1:02d}{ext}"
+        assets = d / ASSETS_DIR
+        if kind == "clip":
+            if len(job.clips) >= MAX_CLIPS:
+                await msg.reply_text(f"Max {MAX_CLIPS} clips per job.")
+                return
+            dest = d / f"clip{len(job.clips) + 1:02d}{ext}"
+        else:
+            existing = list(assets.glob(f"{'image' if kind == 'image' else 'music'}*")) \
+                if assets.is_dir() else []
+            limit = MAX_IMAGES if kind == "image" else MAX_MUSIC
+            if len(existing) >= limit:
+                await msg.reply_text(f"Max {limit} {kind} files per job.")
+                return
+            dest = assets / f"{'image' if kind == 'image' else 'music'}{len(existing) + 1:02d}{ext}"
+        dest.parent.mkdir(parents=True, exist_ok=True)
         try:
             await self._download(context, tg.file_id, dest)
         except BadRequest as e:
@@ -263,21 +300,38 @@ class Handlers:
                 await msg.reply_text(self._too_big(tg.file_size))
                 return
             raise
+
         try:
             info = await asyncio.to_thread(probe, dest)
-            if not info["has_video"]:
+            if kind == "clip" and not info["has_video"]:
                 raise ValueError("no video stream")
+            if kind == "music" and not info["has_audio"]:
+                raise ValueError("no audio stream")
         except Exception:  # noqa: BLE001
             dest.unlink(missing_ok=True)
-            await msg.reply_text("I couldn't read that file as a video. Try another file.")
+            await msg.reply_text(f"I couldn't read that file as {'a video' if kind == 'clip' else 'an image' if kind == 'image' else 'audio'}. Try another file.")
             return
-        job = self.db.add_clip(job.id, str(dest))
-        text = (f"Got clip {len(job.clips)} ({_mb(dest.stat().st_size)}, "
-                f"{info['duration']:.1f}s, {info['width']}x{info['height']}). "
-                "Send more clips, or tell me how to edit them.")
-        if as_video:
-            text += ("\nTip: Telegram compressed this one. For best quality send clips as a "
-                     "File (📎 → File).")
+        if msg.caption:
+            add_note(d, dest, msg.caption.strip())
+
+        if kind == "clip":
+            job = self.db.add_clip(job.id, str(dest))
+            text = (f"Got clip {len(job.clips)} ({_mb(dest.stat().st_size)}, "
+                    f"{info['duration']:.1f}s, {info['width']}x{info['height']}).")
+        elif kind == "image":
+            text = f"Got image {dest.stem[-2:]} ({info['width']}x{info['height']}) – I can place it as a logo, sticker or photo."
+        else:
+            text = f"Got music {dest.stem[-2:]} ({info['duration']:.0f}s) – I can mix it under your voice."
+        if job.state == JobState.COLLECTING:
+            text += " Send more, or tell me how to edit."
+        else:
+            text += (" Now tell me how to use it (e.g. “put this logo top-left for the whole "
+                     "reel” or “add this music quietly under everything”).")
+        if msg.caption:
+            text += "\nI'll pass your caption on as a note."
+        if compressed:
+            text += ("\nTip: Telegram compressed this. For best quality send it as a File "
+                     "(📎 → File).")
         await msg.reply_text(text)
 
     def _too_big(self, size: int | None) -> str:
@@ -419,14 +473,30 @@ def build_application(settings: Settings) -> Application:
     worker = Worker(db, pipeline)
     Handlers(settings, db, worker).register(app)
 
+    background: list[asyncio.Task] = []
+
     async def post_init(application: Application) -> None:
-        worker.recover()
-        application.create_task(worker.run_forever())
-        application.create_task(cleanup_loop(db, settings.jobs_dir, settings.cleanup_after_hours))
+        await worker.recover()
+        # plain asyncio tasks: the Application isn't "running" yet inside post_init
+        background.append(asyncio.create_task(worker.run_forever()))
+        background.append(asyncio.create_task(
+            cleanup_loop(db, settings.jobs_dir, settings.cleanup_after_hours)))
         log.info("bot ready: backend=%s lean=%s local_api=%s max=%ss", settings.agent_backend,
                  settings.lean_mode, settings.local_bot_api, MAX_OUTPUT_SECONDS)
 
+    async def post_shutdown(application: Application) -> None:
+        for task in background:
+            task.cancel()
+
+    async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if isinstance(context.error, NetworkError):
+            log.warning("Telegram network error (will retry): %s", context.error)
+        else:
+            log.error("unhandled error", exc_info=context.error)
+
     app.post_init = post_init
+    app.post_shutdown = post_shutdown
+    app.add_error_handler(on_error)
     app.bot_data.update(db=db, worker=worker)
     return app
 

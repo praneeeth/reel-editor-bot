@@ -1,6 +1,7 @@
 """Pipeline + worker with a mocked agent backend and a real ffmpeg render."""
 
 import asyncio
+import json
 import shutil
 
 import pytest
@@ -38,7 +39,11 @@ async def test_full_flow_plan_execute_revise_final(env):
     assert db.get(job.id).state == JobState.AWAITING_APPROVAL
     edit = settings.jobs_dir / job.id / "edit"
     assert (edit / "inventory.json").exists() and (edit / "takes_packed.md").exists()
-    assert "Transcribing…" in [e[1] for e in notifier.events if e[0] == "status"]
+    statuses = [e[1] for e in notifier.events if e[0] == "status"]
+    assert "Checking clips…" in statuses
+    assert "Transcribing…" not in statuses  # fixture transcript is cached (Hard Rule 9)
+    inv = json.loads((edit / "inventory.json").read_text())
+    assert inv["clips"][0]["spoken_words"] == 17 and inv["images"] == [] and inv["music"] == []
     plan_prompt = backend.calls[0]["prompt"]
     assert "cut the ums, punchy reel" in plan_prompt and "SKILL.md" in plan_prompt
     assert "At most 2 timeline_view" in plan_prompt  # lean plan: tiny visual budget
@@ -166,3 +171,40 @@ def test_cleanup_deletes_delivered_job_folders(env):
     db.update(job.id, delivered_at=1.0)
     assert cleanup_old_jobs(db, settings.jobs_dir, hours=24) == [job.id]
     assert not (settings.jobs_dir / job.id).exists()
+
+
+async def test_assets_reach_the_prompts(env):
+    from PIL import Image
+
+    from reelbot.media import add_note
+
+    settings, db, job = env
+    d = settings.jobs_dir / job.id
+    (d / "assets").mkdir()
+    Image.new("RGBA", (100, 50), (0, 0, 0, 0)).save(d / "assets" / "image01.png")
+    add_note(d, d / "assets" / "image01.png", "logo")
+    backend = FakeBackend()
+    db.transition(job.id, Event.INSTRUCTION, instruction="add my logo")
+    await Pipeline(settings, db, backend, FakeNotifier()).run(job.id)
+    prompt = backend.calls[0]["prompt"]
+    assert "image01.png" in prompt and '"note": "logo"' in prompt and '"transparent": true' in prompt
+    assert "At most 4 timeline_view" in prompt  # images get a bigger look budget
+    db.transition(job.id, Event.APPROVE)
+    await Pipeline(settings, db, backend, FakeNotifier()).run(job.id)
+    assert '"images"' in backend.calls[1]["prompt"] and "transition_in" in backend.calls[1]["prompt"]
+
+
+async def test_restart_resumes_interrupted_steps(env):
+    settings, db, job = env
+    db.transition(job.id, Event.INSTRUCTION, instruction="x")
+    for ev in (Event.START, Event.DONE, Event.APPROVE, Event.START, Event.DONE):
+        db.transition(job.id, ev)
+    db.transition(job.id, Event.FEEDBACK, feedback="add the logo")
+    db.transition(job.id, Event.START)  # REVISING when the process died
+    notifier = FakeNotifier()
+    w = Worker(db, Pipeline(settings, db, FakeBackend(), notifier))
+    await w.recover()
+    j = db.get(job.id)
+    assert j.state == JobState.REVISE_QUEUED and j.feedback == "add the logo"
+    assert w.position(job.id) == 1
+    assert "resuming" in notifier.events[-1][1]

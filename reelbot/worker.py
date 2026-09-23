@@ -9,9 +9,12 @@ from pathlib import Path
 
 from .db import DB
 from .pipeline import Pipeline
-from .states import QUEUED, RUNNING, Event, JobState
+from .states import QUEUED, RUNNING, STEP_FOR_QUEUED, JobState
 
 log = logging.getLogger(__name__)
+
+# running state -> the queued state that re-runs it
+RESUME_STATE = {running: queued for queued, (running, _) in STEP_FOR_QUEUED.items()}
 
 
 class Worker:
@@ -45,10 +48,24 @@ class Worker:
             return True
         return False
 
-    def recover(self) -> None:
-        """After a restart: re-queue queued jobs, fail interrupted ones."""
+    async def recover(self) -> None:
+        """After a restart: re-queue queued jobs and re-run steps that were interrupted.
+
+        Every step can safely run again from its inputs (transcripts are cached, the agent
+        rewrites its own outputs, FINAL is deterministic), so an interrupted step goes back
+        to its queued state and the user is told it is resuming.
+        """
         for job in self.db.jobs_in_states(RUNNING):
-            self.db.transition(job.id, Event.FAIL, error="interrupted by a bot restart")
+            queued = RESUME_STATE[job.state]
+            self.db.update(job.id, state=queued, error=None)
+            log.info("resuming %s after restart (%s -> %s)", job.id, job.state, queued)
+            notifier = getattr(self.pipeline, "notifier", None)
+            if notifier is not None:
+                try:
+                    await notifier.status(self.db.get(job.id),
+                                          "The bot restarted mid-step – resuming your job…")
+                except Exception:  # noqa: BLE001 - telling the user is best effort
+                    log.warning("could not notify %s about resuming", job.id)
         for job in self.db.jobs_in_states(QUEUED):
             self._pending.append(job.id)
             self.queue.put_nowait(job.id)

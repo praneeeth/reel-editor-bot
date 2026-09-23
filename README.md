@@ -6,6 +6,12 @@ the edit and waits for your approval. It then sends a 720p preview, takes revisi
 delivers a 1080x1920 @ 30fps export (max 180 s) with burned-in bold captions placed clear of
 the Instagram/YouTube UI.
 
+Besides cutting, the edit can use transitions, speed ramps, punch-in and slow zooms,
+reframing, text titles, b-roll cutaways (full screen or picture-in-picture), images and logos,
+background music ducked under your voice, and blur boxes to hide something in the frame. Send
+the extra clips, images and music along with your footage, or later with a revision. It can't
+generate new footage, images or music.
+
 The editing is done by [video-use](https://github.com/browser-use/video-use) (MIT), driven by
 a headless coding agent that runs on **your own** Claude Pro plan (`claude -p`) or ChatGPT plan
 (`codex exec`). No paid LLM API is used. Your subscription must not power a product for other
@@ -23,7 +29,8 @@ pipeline.py  PLAN    ffprobe + Scribe transcription (cached) + pack  → agent w
              REVISE  FRESH agent session: project.md + edl.json + your feedback → new preview
              FINAL   no LLM: render.py re-renders the approved EDL at 1080x1920
 agent/  AgentBackend: claude -p | codex exec (AGENT_BACKEND), logs turns/tokens/cost per step
-render.py  video-use's helpers/render.py + 9:16 centre-crop + safe-zone ASS captions
+render.py  video-use's helpers/render.py + 9:16 crop/zoom/speed, transitions, b-roll, images,
+           blur, music ducking, safe-zone ASS captions and titles (EDL keys: reelbot/edl.py)
 ```
 
 video-use lives at `vendor/video-use` as a git submodule. At startup the bot links it into
@@ -104,6 +111,10 @@ Mode, it creates a directory junction instead of a symlink.
 4. Send `cut the ums, punchy 30s reel, bold captions`.
 5. Wait for the plan (a few minutes), then tap **Approve**. You'll get a 720p preview.
 6. Reply `yellow captions` to test a revision, then tap **Final** for the 1080x1920 file.
+
+To try the creative tools, also send a logo (as File, to keep transparency) and an MP3. Add a
+caption to any file to say what it's for. Then ask for something like `fade transitions,
+title "3 TIPS" at the start, my logo top-left, music quietly underneath`.
 
 `/status` shows progress, agent turns and estimated API cost. `/cancel` stops the current
 job, and `/new` starts a fresh one. Job folders are deleted 24 h after delivery.
