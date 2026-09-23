@@ -8,7 +8,7 @@ import pytest
 
 from conftest import clean_edl, make_clip, needs_media
 from reelbot.media import fit_to_size, probe
-from reelbot.render import SAFE_BOTTOM, SAFE_RIGHT, _parse_srt, render_edl
+from reelbot.render import SAFE_BOTTOM, SAFE_RIGHT, caption_cues, render_edl
 
 pytestmark = needs_media
 
@@ -49,7 +49,9 @@ def test_final_spec(final_render, dark_job):
 
 
 def test_captions_burned_in_and_inside_safe_zone(final_render, dark_job):
-    cues = _parse_srt((dark_job / "edit" / "master.srt").read_text())
+    edl = json.loads((dark_job / "edit" / "edl.json").read_text())
+    cues = caption_cues(edl, dark_job / "edit")
+    assert (dark_job / "edit" / "master.srt").read_text().count("-->") == len(cues)
     assert len(cues) >= 4
     # the filler words were cut, so they must not be captioned
     assert not any(t.startswith(("UM", "UH")) for _, _, t in cues)

@@ -96,3 +96,43 @@ def test_fixture_clip_edl_is_valid(job_dir):
     assert fillers
     for f in fillers:
         assert not any(r["start"] < f["start"] < r["end"] for r in edl["ranges"])
+
+
+def test_transition_overlapping_speech_rejected(tmp_path):
+    words = [{"text": "a", "start": 1.0, "end": 1.9, "type": "word"},
+             {"text": "b", "start": 3.0, "end": 3.5, "type": "word"}]
+    d = _job(tmp_path, words)
+    tr = {"type": "fade", "duration": 0.4}
+    bad = _edl([{"source": "c", "start": 0.9, "end": 2.0},
+                {"source": "c", "start": 2.9, "end": 3.6, "transition_in": tr}])
+    errs = validate_edl(bad, d, check_files=False)
+    assert any("overlaps speech at the end of range[0]" in e for e in errs)
+    assert any("overlaps speech at its start" in e for e in errs)
+    good = _edl([{"source": "c", "start": 0.9, "end": 2.4},
+                 {"source": "c", "start": 2.5, "end": 3.6, "transition_in": tr}])
+    assert validate_edl(good, d, check_files=False) == []
+
+
+def test_creative_keys_validation(tmp_path):
+    d = _job(tmp_path)
+    base = [{"source": "c", "start": 0.9, "end": 2.3}]  # 1.4 s reel
+    edl = _edl([{**base[0], "speed": 3, "zoom": 0.5, "transition_in": {"type": "fade"}}],
+               texts=[{"text": "x" * 100, "at": 0, "duration": 5, "position": "bottom"}],
+               broll=[{"source": "zz", "start": 1, "end": 0.5, "at": 0}],
+               images=[{"file": "nope.png", "at": 0, "duration": 1, "x": 0.95, "y": 0.5}],
+               blur=[{"x": 0.9, "y": 0.1, "w": 0.3, "h": 0.1, "at": 0, "duration": 1}],
+               music={"file": "nope.mp3", "volume": 3})
+    errs = "\n".join(validate_edl(edl, d))
+    for needle in ["speed=3.0", "zoom=0.5", "range[0] cannot have transition_in",
+                   "longer than 80", "position must be", "not in 'sources'", "0 <= start < end",
+                   "images[0] file not found", "goes outside the frame", "blur[0] box",
+                   "music file not found", "music volume"]:
+        assert needle in errs, needle
+
+
+def test_text_window_must_fit_the_reel(tmp_path):
+    d = _job(tmp_path)
+    edl = _edl([{"source": "c", "start": 0.9, "end": 2.3}],
+               texts=[{"text": "hi", "at": 1.0, "duration": 2.0}])
+    assert "ends at 3.00s but the reel is only 1.40s long" in "\n".join(
+        validate_edl(edl, d, check_files=False))
