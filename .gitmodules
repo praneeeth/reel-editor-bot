@@ -1,0 +1,3 @@
+[submodule "vendor/video-use"]
+	path = vendor/video-use
+	url = https://github.com/browser-use/video-use
