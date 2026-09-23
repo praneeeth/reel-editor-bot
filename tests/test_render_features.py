@@ -142,3 +142,18 @@ def test_music_fills_silence(rendered, tmp_path):
     quiet = render_edl(edit / "edl_nomusic.json", tmp_path / "nomusic.mp4", preview=True,
                        loudnorm=False)
     assert rms_db(quiet.path, t_transition) < rms_db(res.path, t_transition) - 10
+
+
+def test_music_can_replace_the_original_audio(rendered, tmp_path):
+    res, edl = rendered
+    edit = res.path.parent
+    silent = tmp_path / "silence.mp3"
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i",
+                    "anullsrc=r=48000:cl=stereo", "-t", "4", str(silent)], check=True)
+    speech_t = 0.6  # "everyone," is spoken here
+    assert rms_db(res.path, speech_t) > -40
+    replaced = {**edl, "music": {"file": str(silent), "replace_audio": True}, "captions": False}
+    (edit / "edl_replace.json").write_text(json.dumps(replaced))
+    out = render_edl(edit / "edl_replace.json", tmp_path / "replaced.mp4", preview=True,
+                     loudnorm=False)
+    assert rms_db(out.path, speech_t) < -60  # the voice is gone; only the (silent) song remains

@@ -19,7 +19,10 @@ Top level:
                 "mode": "full" | "pip", "focus_x": 0.5}]        video only; main audio continues
     "images": [{"file": "/abs/assets/image01.png", "at": 0, "duration": 3,
                 "x": 0.5, "y": 0.2, "width": 0.4}]              x/y = centre of the image
-    "music":  {"file": "/abs/assets/music01.mp3", "volume": 0.15, "duck": true, "offset": 0}
+    "music":  {"file": "/abs/assets/music01.mp3", "volume": 0.15, "duck": true, "offset": 0,
+               "replace_audio": false, "source_volume": 1.0}
+               replace_audio=true: the song replaces the clips' own sound (volume defaults to 1)
+               source_volume: turn the clips' own sound down (0-1) under the music
     "blur":   [{"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.1, "at": 2, "duration": 3}]  hide something
 """
 
@@ -409,12 +412,13 @@ def _validate_additions(errors, edl, edit_dir, sources, total, check_files) -> N
         else:
             if check_files and not resolve_source(str(music["file"]), edit_dir).exists():
                 errors.append(f"music file not found: {music['file']}")
-            vol = music.get("volume", 0.15)
             try:
-                if not 0.0 < float(vol) <= 1.0:
+                if not 0.0 < float(music.get("volume", 0.15)) <= 1.0:
                     errors.append("music volume must be > 0 and <= 1.0")
+                if not 0.0 <= float(music.get("source_volume", 1.0)) <= 1.0:
+                    errors.append("music source_volume must be 0-1")
             except (TypeError, ValueError):
-                errors.append("music volume must be a number")
+                errors.append("music volume/source_volume must be numbers")
 
 
 def check_edl(edl_path: Path, **kwargs) -> dict:

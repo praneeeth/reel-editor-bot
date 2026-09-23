@@ -72,7 +72,10 @@ times ("at"/"duration") are seconds on the finished reel; x/y/w/h are fractions 
   "images": [{"file": "<abs path from inventory>", "at": 0, "duration": 3, "x": 0.5,
              "y": 0.2, "width": 0.3}]     x/y = centre; logos usually small, e.g. top-left
   "music":  {"file": "<abs path from inventory>", "volume": 0.12, "duck": true, "offset": 0}
-             only music the user sent; ducked under speech automatically
+             only music the user sent; ducked under speech automatically. To REPLACE the
+             clips' own sound with the song (e.g. "use my song instead"), set
+             "replace_audio": true (volume defaults to 1.0; consider "captions": false if the
+             words no longer match). "source_volume": 0-1 turns the original sound down.
   "blur":   [{"x": 0.1, "y": 0.3, "w": 0.3, "h": 0.1, "at": 2, "duration": 3}]
              hide something in the frame (a plate, a screen, a face) for a window
 Keep texts, images and PiP clear of the platform UI: nothing right of x=0.85 or below y=0.80.

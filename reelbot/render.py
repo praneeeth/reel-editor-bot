@@ -357,20 +357,29 @@ def compose(edl: dict, edit_dir: Path, base: Path, out: Path, *, width: int, hei
     music = edl.get("music")
     if music:
         inputs += ["-stream_loop", "-1", "-i", str(resolve_source(music["file"], edit_dir))]
-        vol = float(music.get("volume", 0.15))
+        replace = bool(music.get("replace_audio", False))
+        vol = float(music.get("volume", 1.0 if replace else 0.15))
         offset = float(music.get("offset", 0.0))
         fade_out = max(0.0, total - 1.5)
         parts.append(f"[{n}:a]atrim=start={offset:.3f},asetpts=PTS-STARTPTS,"
                      f"atrim=duration={total:.3f},aresample=48000,"
                      f"aformat=channel_layouts=stereo,volume={vol},"
                      f"afade=t=in:d=0.8,afade=t=out:st={fade_out:.3f}:d=1.5[mu]")
-        if music.get("duck", True):
-            parts.append("[0:a]asplit=2[sp][sc]")
+        src_vol = float(music.get("source_volume", 1.0))
+        speech = "[0:a]"
+        if not replace and abs(src_vol - 1.0) > 1e-3:
+            parts.append(f"[0:a]volume={src_vol}[spv]")
+            speech = "[spv]"
+        if replace:
+            # the song replaces the clip's own sound entirely
+            parts.append("[mu]anull[aout]")
+        elif music.get("duck", True):
+            parts.append(f"{speech}asplit=2[sp][sc]")
             parts.append("[mu][sc]sidechaincompress=threshold=0.02:ratio=10:attack=15:"
                          "release=400[mud]")
             parts.append("[sp][mud]amix=inputs=2:duration=first:normalize=0[aout]")
         else:
-            parts.append("[0:a][mu]amix=inputs=2:duration=first:normalize=0[aout]")
+            parts.append(f"{speech}[mu]amix=inputs=2:duration=first:normalize=0[aout]")
         audio_map = "[aout]"
         n += 1
 

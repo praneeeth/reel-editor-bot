@@ -136,3 +136,10 @@ def test_text_window_must_fit_the_reel(tmp_path):
                texts=[{"text": "hi", "at": 1.0, "duration": 2.0}])
     assert "ends at 3.00s but the reel is only 1.40s long" in "\n".join(
         validate_edl(edl, d, check_files=False))
+
+
+def test_music_source_volume_range(tmp_path):
+    d = _job(tmp_path)
+    edl = _edl([{"source": "c", "start": 0.9, "end": 2.3}],
+               music={"file": "m.mp3", "source_volume": 2})
+    assert "music source_volume must be 0-1" in validate_edl(edl, d, check_files=False)
