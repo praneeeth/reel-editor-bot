@@ -1,0 +1,19 @@
+# Optional local Telegram Bot API server (off by default).
+# Lifts the hosted limits (20 MB download / 50 MB upload) to 2000 MB.
+#   docker compose --profile local-api up -d
+# then set TELEGRAM_API_BASE_URL=http://localhost:8081 in .env.
+# Needs TELEGRAM_API_ID / TELEGRAM_API_HASH from https://my.telegram.org/apps (read from .env).
+services:
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    profiles: ["local-api"]
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:?set TELEGRAM_API_ID in .env}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:?set TELEGRAM_API_HASH in .env}
+      TELEGRAM_LOCAL: "1"
+    ports:
+      - "127.0.0.1:8081:8081"
+    volumes:
+      # must match TELEGRAM_API_DATA_DIR so the bot can read downloaded files
+      - ./tg-bot-api-data:/var/lib/telegram-bot-api
+    restart: unless-stopped

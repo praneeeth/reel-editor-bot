@@ -1,0 +1,28 @@
+# Secrets
+.env
+.env.local
+
+# Job workspaces and media
+jobs/
+tg-bot-api-data/
+*.mp4
+*.mov
+*.MOV
+*.MP4
+*.mkv
+*.m4v
+*.avi
+*.webm
+*.wav
+*.mp3
+*.m4a
+*.png
+*.jpg
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
