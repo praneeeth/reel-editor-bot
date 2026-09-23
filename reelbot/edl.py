@@ -39,9 +39,11 @@ class CaptionStyle:
 
     @classmethod
     def from_edl(cls, edl: dict) -> "CaptionStyle":
-        raw = edl.get("captions") or {}
+        raw = edl.get("captions", {})
         if raw is False:
             return cls(enabled=False)
+        if not isinstance(raw, dict):
+            raw = {}
         color = str(raw.get("color", "white")).strip().lower()
         rgb = NAMED_COLORS.get(color) or color.lstrip("#").upper()
         if len(rgb) != 6 or any(c not in "0123456789ABCDEF" for c in rgb):
