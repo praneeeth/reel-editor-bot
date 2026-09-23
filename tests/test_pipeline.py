@@ -192,3 +192,19 @@ async def test_assets_reach_the_prompts(env):
     db.transition(job.id, Event.APPROVE)
     await Pipeline(settings, db, backend, FakeNotifier()).run(job.id)
     assert '"images"' in backend.calls[1]["prompt"] and "transition_in" in backend.calls[1]["prompt"]
+
+
+async def test_restart_resumes_interrupted_steps(env):
+    settings, db, job = env
+    db.transition(job.id, Event.INSTRUCTION, instruction="x")
+    for ev in (Event.START, Event.DONE, Event.APPROVE, Event.START, Event.DONE):
+        db.transition(job.id, ev)
+    db.transition(job.id, Event.FEEDBACK, feedback="add the logo")
+    db.transition(job.id, Event.START)  # REVISING when the process died
+    notifier = FakeNotifier()
+    w = Worker(db, Pipeline(settings, db, FakeBackend(), notifier))
+    await w.recover()
+    j = db.get(job.id)
+    assert j.state == JobState.REVISE_QUEUED and j.feedback == "add the logo"
+    assert w.position(job.id) == 1
+    assert "resuming" in notifier.events[-1][1]

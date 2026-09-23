@@ -476,7 +476,7 @@ def build_application(settings: Settings) -> Application:
     background: list[asyncio.Task] = []
 
     async def post_init(application: Application) -> None:
-        worker.recover()
+        await worker.recover()
         # plain asyncio tasks: the Application isn't "running" yet inside post_init
         background.append(asyncio.create_task(worker.run_forever()))
         background.append(asyncio.create_task(
