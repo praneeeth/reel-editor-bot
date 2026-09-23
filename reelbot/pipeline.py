@@ -17,7 +17,7 @@ from .agent import AgentBackend, AgentError, AgentResult
 from .config import MAX_OUTPUT_SECONDS, Settings
 from .db import DB, Job
 from .edl import EDLError, check_edl
-from .media import fit_to_size, inventory, probe
+from .media import asset_inventory, fit_to_size, inventory, probe
 from .prompts import execute_prompt, plan_prompt, revise_prompt
 from .states import STEP_FOR_QUEUED, Event, JobState
 
@@ -130,15 +130,7 @@ class Pipeline:
         edit = d / "edit"
         edit.mkdir(parents=True, exist_ok=True)
 
-        await self.notifier.status(job, "Checking clips…")
-        inv = await asyncio.to_thread(inventory, d)
-        if not inv or not any(i["has_video"] for i in inv):
-            raise StepError("no readable video clips in this job")
-        (edit / "inventory.json").write_text(json.dumps(inv, indent=2))
-
-        await self.notifier.status(job, "Transcribing…")
-        await self._timed_local(job, "transcribe", self._transcribe_all, d, inv)
-        await asyncio.to_thread(self._pack, edit)
+        await self._prepare_sources(job)
 
         previous = _read_json(edit / "plan.json") if job.feedback else None
         await self.notifier.status(job, "Planning… (the agent is reading the transcript)")
@@ -155,6 +147,34 @@ class Pipeline:
             raise StepError("the agent did not write edit/plan.json with a summary")
         job = self.db.transition(job.id, Event.DONE, feedback=None)
         await self.notifier.plan(job, plan)
+
+    async def _prepare_sources(self, job: Job) -> None:
+        """Inventory clips + assets, transcribe new clips (cached), pack. Cheap to repeat."""
+        d = job_dir(self.settings, job)
+        edit = d / "edit"
+        edit.mkdir(parents=True, exist_ok=True)
+        await self.notifier.status(job, "Checking clips…")
+        clips = await asyncio.to_thread(inventory, d)
+        if not clips or not any(i["has_video"] for i in clips):
+            raise StepError("no readable video clips in this job")
+        if self._needs_transcription(edit, clips):
+            await self.notifier.status(job, "Transcribing…")
+            await self._timed_local(job, "transcribe", self._transcribe_all, d, clips)
+        await asyncio.to_thread(self._pack, edit)
+        for c in clips:
+            tr = edit / "transcripts" / f"{c['name']}.json"
+            words = []
+            if tr.exists():
+                words = [w for w in json.loads(tr.read_text()).get("words", [])
+                         if w.get("type") == "word"]
+            c["spoken_words"] = len(words)
+        assets = await asyncio.to_thread(asset_inventory, d)
+        (edit / "inventory.json").write_text(json.dumps({"clips": clips, **assets}, indent=2))
+
+    @staticmethod
+    def _needs_transcription(edit: Path, clips: list[dict]) -> bool:
+        return any(c["has_audio"] and not (edit / "transcripts" / f"{c['name']}.json").exists()
+                   for c in clips)
 
     def _transcribe_all(self, d: Path, inv: list[dict]) -> None:
         sys.path.insert(0, str(VIDEO_USE_DIR / "helpers"))
@@ -205,6 +225,7 @@ class Pipeline:
             shutil.copy(edit / "edl.json", edit / "history" / f"edl_v{rev - 1}.json")
         job = self.db.update(job.id, revision=rev)
 
+        await self._prepare_sources(job)  # picks up clips / images / music sent since the plan
         resume = None if self.settings.lean_mode else job.session_id
         await self.notifier.status(job, f"Revising (v{rev})… fresh agent session"
                                    if resume is None else f"Revising (v{rev})…")

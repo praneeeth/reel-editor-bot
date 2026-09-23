@@ -1,6 +1,8 @@
 """Bot handlers with mocked Telegram objects and a mocked worker/backend."""
 
+import json
 import shutil
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -28,10 +30,11 @@ def h(tmp_path):
     return Handlers(settings, db, worker)
 
 
-def message(text=None, video=None, document=None):
+def message(text=None, video=None, document=None, photo=None, audio=None, caption=None):
     m = MagicMock()
     m.text = text
     m.video, m.video_note, m.document = video, None, document
+    m.photo, m.audio, m.caption = photo, audio, caption
     m.reply_text = AsyncMock()
     m.reply_html = AsyncMock()
     return m
@@ -90,7 +93,7 @@ async def test_get_file_too_big_error_is_explained(h):
 async def test_non_video_document_rejected(h):
     msg = message(document=doc(1000, name="notes.pdf", mime="application/pdf"))
     await h.media(update(msg), context())
-    assert "doesn't look like a video" in replies(msg)
+    assert "doesn't look like any of them" in replies(msg)
 
 
 def _tg_file(src):
@@ -250,3 +253,56 @@ async def test_notifier_edits_status_message_within_a_step(tmp_path):
     assert "&lt;it&gt;" in text and "~40s" in text
     kb = bot.send_message.call_args.kwargs["reply_markup"].inline_keyboard[0]
     assert [b.callback_data for b in kb] == [f"approve:{job.id}", f"change:{job.id}"]
+
+
+def _tg_png(tmp_path):
+    from PIL import Image
+    src = tmp_path / "logo.png"
+    Image.new("RGBA", (120, 60), (255, 0, 0, 128)).save(src)
+    return src
+
+
+async def test_image_and_music_become_assets_with_notes(h, tmp_path):
+    png = _tg_png(tmp_path)
+    doc_png = SimpleNamespace(file_id="P1", file_size=png.stat().st_size, file_name="logo.png",
+                              mime_type="image/png")
+    msg = message(document=doc_png, caption="my logo, top left")
+    await h.media(update(msg), context(AsyncMock(return_value=_tg_file(png))))
+    job = h.db.active_job(OWNER)
+    assets = h.settings.jobs_dir / job.id / "assets"
+    assert (assets / "image01.png").exists() and "Got image 01 (120x60)" in replies(msg)
+    assert json.loads((assets / "notes.json").read_text()) == {"image01.png": "my logo, top left"}
+    assert job.clips == []  # an image is not a clip
+
+    mp3 = tmp_path / "song.mp3"
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i",
+                    "sine=frequency=440:duration=2", str(mp3)], check=True)
+    audio = SimpleNamespace(file_id="A1", file_size=mp3.stat().st_size, file_name="song.mp3")
+    msg = message(audio=audio)
+    await h.media(update(msg), context(AsyncMock(return_value=_tg_file(mp3))))
+    assert (assets / "music01.mp3").exists() and "Got music 01 (2s)" in replies(msg)
+
+    # a compressed Telegram photo is accepted too, with the quality tip
+    photo = [SimpleNamespace(file_id="S", file_size=10), SimpleNamespace(file_id="L",
+                                                                         file_size=png.stat().st_size)]
+    msg = message(photo=photo)
+    await h.media(update(msg), context(AsyncMock(return_value=_tg_file(png))))
+    assert (assets / "image02.jpg").exists() and "as a File" in replies(msg)
+
+
+async def test_assets_can_be_added_after_the_preview(h, tmp_path):
+    job = await _job_in(h, [(Event.INSTRUCTION, {"instruction": "x"}), (Event.START, {}),
+                            (Event.DONE, {}), (Event.APPROVE, {}), (Event.START, {}),
+                            (Event.DONE, {})])
+    assert job.state == JobState.PREVIEW_READY
+    png = _tg_png(tmp_path)
+    msg = message(document=SimpleNamespace(file_id="P", file_size=100, file_name="l.png",
+                                           mime_type="image/png"))
+    await h.media(update(msg), context(AsyncMock(return_value=_tg_file(png))))
+    assert "Now tell me how to use it" in replies(msg)
+    # but not while the agent is working
+    h.db.transition(job.id, Event.FEEDBACK, feedback="add logo")
+    msg = message(document=SimpleNamespace(file_id="P", file_size=100, file_name="l.png",
+                                           mime_type="image/png"))
+    await h.media(update(msg), context(AsyncMock(return_value=_tg_file(png))))
+    assert "Wait for it to finish" in replies(msg)

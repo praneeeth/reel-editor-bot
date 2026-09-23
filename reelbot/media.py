@@ -7,6 +7,10 @@ import subprocess
 from pathlib import Path
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".wav", ".ogg", ".oga", ".flac", ".opus"}
+ASSETS_DIR = "assets"
+NOTES_FILE = "notes.json"
 
 
 def probe(path: Path) -> dict:
@@ -36,9 +40,66 @@ def inventory(job_dir: Path) -> list[dict]:
         if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
             info = probe(p)
             info.update(name=p.stem, path=str(p.resolve()),
-                        orientation="landscape" if info["width"] > info["height"] else "portrait")
+                        orientation="landscape" if info["width"] > info["height"] else "portrait",
+                        note=load_notes(job_dir).get(p.name, ""))
             items.append(info)
     return items
+
+
+def media_kind(name: str, mime: str | None) -> str | None:
+    """'clip', 'image', 'music' or None, from a file name and/or MIME type."""
+    ext, mime = Path(name or "").suffix.lower(), (mime or "").lower()
+    if ext in VIDEO_EXTS or mime.startswith("video/"):
+        return "clip"
+    if ext in IMAGE_EXTS or mime.startswith("image/"):
+        return "image"
+    if ext in AUDIO_EXTS or mime.startswith("audio/"):
+        return "music"
+    return None
+
+
+def load_notes(job_dir: Path) -> dict[str, str]:
+    """Captions the user attached to media, keyed by file name."""
+    try:
+        return json.loads((job_dir / ASSETS_DIR / NOTES_FILE).read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def add_note(job_dir: Path, file: Path, note: str) -> None:
+    notes = load_notes(job_dir)
+    notes[file.name] = note
+    (job_dir / ASSETS_DIR).mkdir(parents=True, exist_ok=True)
+    (job_dir / ASSETS_DIR / NOTES_FILE).write_text(json.dumps(notes, indent=2))
+
+
+def asset_inventory(job_dir: Path) -> dict[str, list[dict]]:
+    """Images (logos, stickers, photos) and music the user sent, with their notes."""
+    from PIL import Image
+
+    notes = load_notes(job_dir)
+    out: dict[str, list[dict]] = {"images": [], "music": []}
+    adir = job_dir / ASSETS_DIR
+    if not adir.is_dir():
+        return out
+    for p in sorted(adir.iterdir()):
+        ext = p.suffix.lower()
+        entry = {"file": str(p.resolve()), "note": notes.get(p.name, "")}
+        if ext in IMAGE_EXTS:
+            try:
+                with Image.open(p) as img:
+                    entry.update(width=img.width, height=img.height,
+                                 transparent=img.mode in ("RGBA", "LA", "P"))
+            except OSError:
+                continue
+            out["images"].append(entry)
+        elif ext in AUDIO_EXTS:
+            try:
+                entry["duration"] = round(probe(p)["duration"], 2)
+            except (subprocess.CalledProcessError, ValueError):
+                continue
+            out["music"].append(entry)
+    return out
 
 
 def fit_to_size(src: Path, dst: Path, max_bytes: int, *, audio_kbps: int = 128) -> Path:
